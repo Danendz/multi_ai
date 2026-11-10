@@ -3,12 +3,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
@@ -54,7 +56,7 @@ func rootCmd() *cobra.Command {
 		Args:          cobra.NoArgs,
 		RunE:          func(cmd *cobra.Command, _ []string) error { return pickAndSwitch() },
 	}
-	root.AddCommand(switchCmd(), addCmd(), importCmd(), runCmd(), envCmd(), lsCmd(), currentCmd(), rmCmd())
+	root.AddCommand(switchCmd(), addCmd(), importCmd(), runCmd(), envCmd(), lsCmd(), currentCmd(), limitsCmd(), rmCmd())
 	return root
 }
 
@@ -235,6 +237,114 @@ func currentCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func limitsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "limits [profile|provider]",
+		Aliases: []string{"usage"},
+		Short:   "Show plan usage limits (5h / weekly) for every saved account",
+		Args:    cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			m, err := manager()
+			if err != nil {
+				return err
+			}
+			var onlyProf, onlyProv string
+			if len(args) == 1 {
+				if m.IsProvider(args[0]) {
+					onlyProv = args[0]
+				} else if _, ok := m.Reg.Profiles[args[0]]; ok {
+					onlyProf = args[0]
+				} else {
+					return fmt.Errorf("no profile or provider %q (profiles: %v)", args[0], m.Reg.Names())
+				}
+			}
+			shown := false
+			for _, p := range m.Providers {
+				if onlyProv != "" && p.Name() != onlyProv {
+					continue
+				}
+				if _, ok := p.(provider.Limiter); !ok {
+					continue
+				}
+				header := false
+				for _, name := range m.Reg.Names() {
+					if onlyProf != "" && name != onlyProf {
+						continue
+					}
+					id, ok := m.Reg.Identity(name, p.Name())
+					if !ok {
+						continue
+					}
+					if !header {
+						if shown {
+							fmt.Println()
+						}
+						fmt.Println(p.Name())
+						header, shown = true, true
+					}
+					mark := " "
+					if m.Reg.Active[p.Name()] == name {
+						mark = "*"
+					}
+					fmt.Printf("%s %s  %s\n", mark, name, id)
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					ws, err := m.Limits(ctx, name, p)
+					cancel()
+					if err != nil {
+						fmt.Printf("    error: %v\n", err)
+						continue
+					}
+					if len(ws) == 0 {
+						fmt.Println("    no limits reported")
+					}
+					for _, w := range ws {
+						line := fmt.Sprintf("    %-12s %3.0f%%  %s  %s", w.Name, w.Percent, bar(w.Percent, 10), resets(w.ResetsAt))
+						fmt.Println(strings.TrimRight(line, " "))
+					}
+				}
+			}
+			switch {
+			case shown:
+			case onlyProv != "":
+				fmt.Printf("no saved %s accounts (add one: ai add %s <profile>)\n", onlyProv, onlyProv)
+			default:
+				fmt.Println("no saved accounts with usage limits (supported: claude, codex)")
+			}
+			return nil
+		},
+	}
+}
+
+func bar(pct float64, width int) string {
+	n := int(pct/100*float64(width) + 0.5)
+	n = max(0, min(width, n))
+	return strings.Repeat("█", n) + strings.Repeat("░", width-n)
+}
+
+func resets(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := time.Until(t).Round(time.Minute)
+	if d <= 0 {
+		return "resets now"
+	}
+	t = t.Local()
+	at := t.Format("15:04")
+	if y, m, dd := time.Now().Date(); t.Year() != y || t.Month() != m || t.Day() != dd {
+		at = t.Format("Mon 2 Jan 15:04")
+	}
+	h, mins := int(d.Hours()), int(d.Minutes())%60
+	in := fmt.Sprintf("%dm", mins)
+	switch {
+	case h >= 24:
+		in = fmt.Sprintf("%dd%dh", h/24, h%24)
+	case h > 0:
+		in = fmt.Sprintf("%dh%02dm", h, mins)
+	}
+	return fmt.Sprintf("resets %s (in %s)", at, in)
 }
 
 func rmCmd() *cobra.Command {

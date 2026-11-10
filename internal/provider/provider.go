@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,6 +49,7 @@ type Deps struct {
 	HomeDir  string
 	Keychain secret.Store
 	User     string
+	HTTP     *http.Client // nil: a default client with a timeout
 }
 
 func DefaultDeps() (Deps, error) {

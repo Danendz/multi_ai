@@ -1,12 +1,15 @@
 package swap
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -236,5 +239,42 @@ func TestRemove(t *testing.T) {
 	}
 	if _, err := os.Stat(e.m.IsolatedHome("a", e.p("codex"))); !os.IsNotExist(err) {
 		t.Fatal("isolated home not removed")
+	}
+}
+
+type roundTrip func(*http.Request) (*http.Response, error)
+
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestLimitsRefreshPropagatesToEveryCopy(t *testing.T) {
+	e := newEnv(t)
+	e.deps.HTTP = &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+		body := `{"limits":[{"kind":"session","percent":7}]}`
+		if strings.HasSuffix(r.URL.Path, "/oauth/token") {
+			body = `{"access_token":"at-new","refresh_token":"rt-new","expires_in":3600}`
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+	})}
+	e.m.Providers = provider.All(e.deps)
+	p := e.p("claude")
+
+	e.loginClaude("w@x.dev", 1000) // long expired
+	e.m.Import("work", nil)
+	home, err := e.m.PrepareIsolated(p, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ws, err := e.m.Limits(context.Background(), "work", p)
+	if err != nil || len(ws) != 1 || ws[0].Percent != 7 {
+		t.Fatalf("ws=%v err=%v", ws, err)
+	}
+	slot, _ := e.m.slot("work", p)
+	_, global := e.live("claude")
+	iso, _ := p.Capture(home)
+	for name, c := range map[string]provider.Creds{"slot": slot, "global": global, "isolated": iso} {
+		if !strings.Contains(string(c), "rt-new") {
+			t.Fatalf("%s copy still has the rotated-out refresh token: %s", name, c)
+		}
 	}
 }

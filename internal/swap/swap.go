@@ -9,6 +9,7 @@ package swap
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -392,6 +393,39 @@ func (m *Manager) Remove(prof string, p provider.Provider) error {
 	}
 	os.Remove(filepath.Join(m.Root, "profiles", prof))
 	return m.Reg.Save()
+}
+
+// Limits fetches plan usage for prof's account of p. If the provider had to
+// refresh the access token, the rotated creds are saved and propagated to
+// every copy of the account before returning, so no login is invalidated.
+func (m *Manager) Limits(ctx context.Context, prof string, p provider.Provider) ([]provider.Window, error) {
+	lim, ok := p.(provider.Limiter)
+	if !ok {
+		return nil, fmt.Errorf("%s does not report usage limits", p.Name())
+	}
+	if _, ok := m.Reg.Identity(prof, p.Name()); !ok {
+		return nil, fmt.Errorf("profile %q has no %s account", prof, p.Name())
+	}
+	if err := m.Sync(prof, p); err != nil {
+		return nil, err
+	}
+	c, err := m.slot(prof, p)
+	if err != nil {
+		return nil, err
+	}
+	ws, fresh, err := lim.Limits(ctx, c)
+	if fresh != nil {
+		if serr := m.saveSlot(prof, p, fresh); serr != nil {
+			return nil, fmt.Errorf("save refreshed token: %w", serr)
+		}
+		if serr := m.Sync(prof, p); serr != nil {
+			return nil, serr
+		}
+		if serr := m.Reg.Save(); serr != nil {
+			return nil, serr
+		}
+	}
+	return ws, err
 }
 
 // Current reports the live global identity per provider.
